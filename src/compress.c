@@ -21,15 +21,35 @@
 #else
 #define KF_USE_SIMD 0
 #endif
-#ifdef __linux__
+#if !defined(_WIN32)
 #include <pthread.h>
+#include <unistd.h>
 #define KF_USE_THREADS 1
 #else
 #define KF_USE_THREADS 0
 #endif
 
+/* Disable noisy BWT tracing in release builds (it hurts throughput). */
+#ifndef KOLIBRI_TRACE_BWT
+#define KOLIBRI_TRACE_BWT 0
+#endif
+
 #define MIN(a, b) ((a) < (b) ? (a) : (b))
 #define MAX(a, b) ((a) > (b) ? (a) : (b))
+
+static size_t kolibri_thread_count(size_t tasks) {
+#if KF_USE_THREADS
+    long n = sysconf(_SC_NPROCESSORS_ONLN);
+    size_t cores = (n > 0) ? (size_t)n : 4u;
+    if (cores < 2) cores = 2;
+    if (cores > 16) cores = 16; /* Avoid oversubscription on many-core hosts. */
+    if (tasks == 0) return 1;
+    return MIN(cores, tasks);
+#else
+    (void)tasks;
+    return 1;
+#endif
+}
 
 /* Magic number for compressed data format */
 #define KOLIBRI_COMPRESS_MAGIC 0x4B4C4252 /* "KLBR" */
@@ -4386,7 +4406,7 @@ static size_t compress_formula_v62(
 
 #if KF_USE_THREADS
     {
-        size_t max_threads = 4;
+        size_t max_threads = kolibri_thread_count(nblocks);
         KF62ThreadArg *args = (KF62ThreadArg *)calloc(nblocks, sizeof(KF62ThreadArg));
         pthread_t *tids = (pthread_t *)calloc(nblocks, sizeof(pthread_t));
         if (!args || !tids) { free(args); free(tids); goto v62c_fail; }
@@ -4484,7 +4504,7 @@ static size_t decompress_formula_v62(
             offsets[i + 1] = offsets[i] + (csizes[i] == 0 ? bsizes[i] : csizes[i]);
         }
 
-        size_t max_threads = 4;
+        size_t max_threads = kolibri_thread_count(nblocks);
         KF62ThreadArg *args = (KF62ThreadArg *)calloc(nblocks, sizeof(KF62ThreadArg));
         pthread_t *tids = (pthread_t *)calloc(nblocks, sizeof(pthread_t));
         if (!args || !tids) {
@@ -4734,7 +4754,9 @@ int kolibri_compress(KolibriCompressor *comp,
         uint8_t *fast_bwt = (uint8_t *)malloc(input_size);
         if (fast_bwt && bw_transform(input, fast_bwt, NULL,
                                       (saidx_t)input_size, &fast_pidx) == 0) {
+#if KOLIBRI_TRACE_BWT
             double t_bwt = get_time_ms() - start_time;
+#endif
             /* MTF */
             uint8_t *fast_mtf = (uint8_t *)malloc(input_size);
             if (fast_mtf) {
@@ -4811,7 +4833,9 @@ int kolibri_compress(KolibriCompressor *comp,
                 /* A: MTF+CM */
                 if (try_a && fast_args[0].output && fast_args[0].result_size > 0) {
                     size_t total = 10 + fast_args[0].result_size; /* BWT_HDR + CM */
+#if KOLIBRI_TRACE_BWT
                     fprintf(stderr, "  [FAST-A] MTF+CM: %zu\n", total);
+#endif
                     if (total < input_size) {
                         best_sz = total;
                         best_fmt = 2; /* KOLIBRI_BWT_FMT_MTF */
@@ -4823,7 +4847,9 @@ int kolibri_compress(KolibriCompressor *comp,
                 /* C: MTF+RLE+TURBO */
                 if (rle_ok && fast_args[1].output && fast_args[1].result_size > 0) {
                     size_t total = 10 + 3 + fast_args[1].result_size;
+#if KOLIBRI_TRACE_BWT
                     fprintf(stderr, "  [FAST-T] MTF+RLE+TURBO: %zu\n", total);
+#endif
                     if (total < input_size && (best_sz == 0 || total < best_sz)) {
                         best_sz = total;
                         best_fmt = 7; /* KOLIBRI_BWT_FMT_MTF_RLE_TURBO */
@@ -4868,12 +4894,14 @@ int kolibri_compress(KolibriCompressor *comp,
                             stats->compression_time_ms = get_time_ms() - start_time;
                             stats->decompression_time_ms = 0;
                         }
+#if KOLIBRI_TRACE_BWT
                         fprintf(stderr, "[FAST_BWT] %zu -> %zu (%.3fx) fmt=%d"
                                 " bwt=%.0fms total=%.0fms\n",
                                 input_size, best_sz,
                                 (double)input_size / best_sz, best_fmt,
                                 t_bwt,
                                 stats ? stats->compression_time_ms : 0.0);
+#endif
 
                         /* Cleanup и выход */
                         free(fast_args[0].output);
@@ -5122,8 +5150,10 @@ int kolibri_compress(KolibriCompressor *comp,
             if (lzcm_size > 1 && lzcm_buf[0] == 0x00) {
                 best_total = KOLIBRI_LZCM_HDR_SIZE + (lzcm_size - 1);
             }
+#if KOLIBRI_TRACE_BWT
             fprintf(stderr, "[BWT_DEBUG] LZCM_direct=%zu trad=%zu\n",
                     best_total, header_size + compressed_size);
+#endif
 
             /* v72: BWT preprocessing — пробуем MTF+CM и MTF+LZCM,
              * выбираем лучший результат. LZCM на MTF потоке эффективно
@@ -5303,7 +5333,9 @@ int kolibri_compress(KolibriCompressor *comp,
                             /* A: MTF + CM */
                             if (var_args[0].output && var_args[0].result_size > 0) {
                                 size_t bwt_total = KOLIBRI_BWT_HDR_SIZE + var_args[0].result_size;
+#if KOLIBRI_TRACE_BWT
                                 fprintf(stderr, "  [A] MTF+CM: %zu\n", bwt_total);
+#endif
                                 if (best_total == 0 || bwt_total < best_total) {
                                     best_total = bwt_total;
                                     best_is_bwt = 1;
@@ -5318,7 +5350,9 @@ int kolibri_compress(KolibriCompressor *comp,
                             /* B: MTF + LZCM */
                             if (var_args[1].output && var_args[1].result_size > 0) {
                                 size_t bwt_total = KOLIBRI_BWT_HDR_SIZE + var_args[1].result_size;
+#if KOLIBRI_TRACE_BWT
                                 fprintf(stderr, "  [B] MTF+LZCM: %zu\n", bwt_total);
+#endif
                                 if (best_total == 0 || bwt_total < best_total) {
                                     best_total = bwt_total;
                                     best_is_bwt = 1;
@@ -5335,8 +5369,10 @@ int kolibri_compress(KolibriCompressor *comp,
                                 var_args[2].result_size > 0) {
                                 size_t cm_rle_size = var_args[2].result_size;
                                 size_t bwt_total = KOLIBRI_BWT_HDR_SIZE + 3 + cm_rle_size;
+#if KOLIBRI_TRACE_BWT
                                 fprintf(stderr, "  [C] MTF+RLE+CM: %zu (rle_in=%zu rle_out=%zu cm=%zu)\n",
                                         bwt_total, input_size, rle_size_c, cm_rle_size);
+#endif
                                 if (best_total == 0 || bwt_total < best_total) {
                                     best_total = bwt_total;
                                     best_is_bwt = 1;
@@ -5359,8 +5395,10 @@ int kolibri_compress(KolibriCompressor *comp,
                                 size_t cm_sz = var_args[3].result_size;
                                 size_t meta_sz = 1 + nblocks_d * 10;
                                 size_t bwt_total = KOLIBRI_BWT_HDR_SIZE + meta_sz + cm_sz;
+#if KOLIBRI_TRACE_BWT
                                 fprintf(stderr, "  [D] MB(%zu×128K) MTF+RLE+CM: %zu (total_rle=%zu cm=%zu)\n",
                                         nblocks_d, bwt_total, total_rle_d, cm_sz);
+#endif
                                 if (best_total == 0 || bwt_total < best_total) {
                                     best_total = bwt_total;
                                     best_is_bwt = 1;
@@ -5396,8 +5434,10 @@ int kolibri_compress(KolibriCompressor *comp,
                             free(rle_total_d);
                             free(mb_bs_d); free(mb_pidx_d); free(mb_rle_sz_d);
 
+#if KOLIBRI_TRACE_BWT
                             fprintf(stderr, "[BWT_DEBUG] input=%zu best=%zu fmt=%d\n",
                                     input_size, best_total, bwt_fmt);
+#endif
 
                             free(mtf_buf);
                         }

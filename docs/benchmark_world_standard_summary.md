@@ -1,7 +1,7 @@
 # Benchmark Summary (Standard Corpora)
 
-Date: 2026-02-19 17:40:05
-Repeats: 3 (median)
+Date: 2026-02-19 18:11:57
+Repeats: 1 (median)
 
 | Dataset | Kolibri Ratio Rank | Kolibri Compress Speed Rank |
 |---|---:|---:|
